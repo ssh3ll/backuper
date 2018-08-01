@@ -1,0 +1,265 @@
+#!/usr/bin/env python
+
+import argparse               # optparse has been deprecated in Python 2.7
+import tarfile
+import os
+import time
+import zipfile
+import sys
+import json
+import threading
+
+# parse command-linke options and arguments
+def parseArgs():
+    parser = argparse.ArgumentParser()
+
+    # if one of the following set of arguments is supplied together
+    # with one option belonging to the mutually exclusive group,
+    # m.e. options have priority, others are just ignored.
+    parser.add_argument("-f", type=str, metavar=('compression_algorithm'), action="store", help="one between zip, gzip")
+    parser.add_argument("-y", action="store_true", default=False, help="always agree")
+
+    group = parser.add_mutually_exclusive_group()
+
+    group.add_argument("-ld", action="store_true", default=False, help="list directories you added")
+    group.add_argument("-ad", type=str, metavar=('dir'), action="store", help="add directory for the backup")
+    group.add_argument("-rd", type=str, metavar=('dir'), action="store", help="remove directory for the backup")
+
+    group.add_argument("-list", action="store_true", default=False, help="list pathnames you added")
+    group.add_argument("-add", type=str, metavar=('file'), action="store", help="add pathname you want to save")
+    group.add_argument("-rm" , type=str, metavar=('file'), action="store", help="remove pathname you want to save")
+
+
+    return parser.parse_args()
+
+'''
+    This function takes one of the supported compression algorithms, a list of pathnames, and a list of destinations.
+    It creates n backups of pathnames into the specified destinations.
+'''
+def start_backup_procedure(algo, pathnames, dests):
+    backup_name = "backuper-"+time.strftime("%Y-%m-%d-%H-%M-%S")+(".zip" if algo == "zip" else ".tar.gz")
+
+    with open(pathnames, 'r') as f:
+        pathnames = [l.replace("\n","") for l in f.readlines()]
+    with open(dests) as f:
+        directories = [l.replace("\n","") for l in f.readlines()]
+
+    deleted_localdirs = []
+    deleted_pathnames = []
+    for d in directories:
+        # if the location has been deleted, go to the next
+        if not os.path.exists(d):
+            deleted_localdirs.append(d)
+            continue
+        # if can't write to some location, go to the next
+        if not os.access(d, os.W_OK):
+            print "cannot write files under '" + d + "'"
+            continue
+
+        print 'saving backup to: ' + d+backup_name
+
+        ziph=None
+        tarh=None
+        if algo == 'zip':
+            ziph = zipfile.ZipFile(d + backup_name, 'w', zipfile.ZIP_DEFLATED, allowZip64 = True)
+        elif algo == 'gzip':
+            tarh = tarfile.open(d + backup_name, "w:gz")
+
+        for p in pathnames:
+            if not os.path.exists(p):
+                print "\tignoring ",p," cause deleted"
+                deleted_pathnames.append(p)
+                continue
+
+            if algo == 'zip':
+                if os.path.isfile(p):
+                    print '\tadding \'' + p + '\' to the archive'
+                    ziph.write(p, os.path.basename(p))
+                else:
+                    for root, dirs, files in os.walk(p):
+                        for file in files:
+                            print '\tadding \'' + root+"/"+file + '\' to the archive'
+                            ziph.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), os.path.join(p, '..')))
+            elif algo == 'gzip':
+                print '\tadding \'' + p + '\' to the archive'
+                tarh.add(p, arcname=os.path.basename(p))
+
+        if ziph != None:
+            ziph.close()
+        if tarh != None:
+            tarh.close()
+
+    for p in deleted_pathnames:
+        del_pathname(p)
+    for d in deleted_localdirs:
+        del_localdir(d)
+
+
+
+# assuming no one will edit the file without using this tool..
+# This method returns True if the provided file contains at least
+# one line, (thus at least one file/directory, depending on the caller)
+# otherwise it returns False
+def has_one_pathname(dest_filename):
+    f = open(dest_filename, "r")
+    text = f.readlines()
+    if len(text) >= 1:
+        return True
+    f.close()
+    return False
+
+def print_file(filename, dir=False):
+    with open(filename, "r") as f:
+        pathnames = [l.replace("\n","") for l in f.readlines()]
+    if len(pathnames) == 0:
+        print "\n[*] No "+("files" if not dir else "directories")+" saved"
+        sys.exit(3)
+    print "\nPathnames you decided to save:" if not dir else "\nBackup Directories: "
+    for l in pathnames:
+        print "\t- "+l
+    print ""
+
+
+# add pathname/directory
+def add_pathname(pathname, dir=False):
+    # check if the pathname exists
+    if not os.path.exists(pathname):
+        print "The provided pathname doesn't exist!"
+        sys.exit(3)
+
+    # compute the absolute path. if it's a directory, add slash if required
+    pathname = os.path.abspath(pathname)
+    if os.path.isdir(pathname) and pathname[-1] != '/':
+        pathname = pathname + "/"
+
+    filename = pathnames_to_compress if not dir else backups_dest
+    r = has_file(filename, pathname)
+
+    if r[0] == 1 or (r[2] == 1 and not dir):       # SAME pathname already stored OR a parent directory is already stored
+        print "[*] Pathname (or a parent directory) already saved" if not dir else "[*] Directory already added"
+        sys.exit(2)
+
+    # if there are subdirectories, remove them and then add the new (more general) pathname
+    if not dir and r[1] == 1:
+        with open(filename, "r") as f:
+            lines = f.readlines()
+            lines = [l.replace("\n", "") for l in lines]    # removes \n
+        with open(filename, "w") as f:
+            for l in lines:
+                if not l.startswith(pathname):
+                    f.write(l+"\n")
+                    f.write(pathname)
+                    print "pathname added"
+
+    # add the pathname
+    with open(filename, "a") as f:
+        f.write(pathname+"\n")
+        print ("pathname " if not dir else "directory ") +"added"
+
+# delete pathname/directory
+def del_pathname(pathname, dir=False):
+    # if pathname exists, obtain its abs path
+    if os.path.exists(pathname):
+        pathname = os.path.abspath(pathname)
+
+    # if it's an existing directory, add a slash when needed
+    if os.path.isdir(pathname) and pathname[-1] != '/':
+        pathname = pathname + "/"
+
+    filename = pathnames_to_compress if not dir else backups_dest
+    r = has_file(filename, pathname)
+
+    if r[0] == 0:
+        print "The pathname hasn't been added yet"
+        sys.exit(2)
+    else:
+        with open(filename, "r") as f:
+            lines = f.readlines()
+            lines = [l.replace("\n","") for l in lines]
+
+        with open(filename, "w") as f:
+            for l in lines:
+                if (dir and l != pathname) or (not dir and not l.startswith(pathname)):
+                    f.write(l+"\n")
+        print ("pathname " if not dir else "directory ")  +"removed"
+
+
+# Returns an array of integers, whichs contains what follows:
+#   res[0] = {0,1} pathname is stored EXACTLY as it's provided as input
+#   res[1] = {0,1} a subdirectory of the pathname is already stored
+#   res[2] = {0,1} a parent directory of the pathname is already stored
+def has_file(filename, pathname):
+    res = [0, 0, 0]
+    with open(filename, "r") as f:
+        text = f.readlines()
+        text = [l.replace("\n","") for l in text]
+    for line in text:
+        if line == pathname:
+            res[0] = 1
+        elif line.startswith(pathname):
+            res[1] = 1
+        elif pathname.startswith(line):
+            res[2] = 1
+
+    return res
+
+
+
+####################################
+############# M A I N ##############
+####################################
+if __name__ == '__main__':
+
+    installdir = "/opt/backuper/"
+    data = json.loads(open(installdir+'conf/conf.json').read())                 # parses the JSON configuration file
+    pathnames_to_compress = installdir+data['pathnames_to_compress']
+    backups_dest = installdir+data['backup_location']
+
+    options = parseArgs()               # parses command line options and arguments
+
+    if options.list == True:            # list saved pathnames
+        print_file(pathnames_to_compress)
+    elif options.ld == True:            # list saved locations
+        print_file(backups_dest, dir=True)
+    elif options.add != None:            # add a new pathname to backup
+        add_pathname(options.add)
+    elif options.ad != None:            # add new directory location
+        add_pathname(options.ad, dir=True)
+    elif options.rm != None:            # rm pathname
+        del_pathname(options.rm)
+    elif options.rd != None:            # rm location
+        del_pathname(options.rd, dir=True)
+    else:                               # perform backup(s)
+        # if there's nothing to save
+        if not has_one_pathname(pathnames_to_compress):
+            print "You've nothing to save! Use the option -add to add your preferred files"
+            print "Quitting..."
+            sys.exit(3)
+
+        # if there are no directories for storing the backup
+        if not has_one_pathname(backups_dest):
+            print "Where am I supposed to store your backups?? Use the option -ad in order to add some dir.\nQuitting.."
+            sys.exit(3)
+
+        algo = "zip"
+        if options.f != None:
+            if options.f in [ "zip", "gzip" ]:
+                algo = options.f
+            else:
+                print "[***] Specified format not supported. Pick one between zip, gzip."
+                print "Quitting..."
+                sys.exit(3)
+
+        if options.y == False:
+            print 'Sure you want to start backup(s) now? (y/n)'
+            start_now = sys.stdin.readline().replace("\n", "")
+            if start_now in [ 'y', 'yes', 'YES', 'Yes', 'Y']:
+                #print "backup start time: " + time.ctime()
+                start_backup_procedure(algo, pathnames_to_compress, backups_dest)
+                #print "backup end time: " + time.ctime()
+            elif start_now in ['n', 'no', 'NO', "No", 'N']:
+                print "Okay, quitting.."
+            else:
+                print "Seems you made a typo. Quitting..."
+        else:
+            start_backup_procedure(algo, pathnames_to_compress, backups_dest)

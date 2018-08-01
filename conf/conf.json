@@ -1,0 +1,8 @@
+{
+"tool_name" : "backuper",
+"backup_location": "localdirs.conf",
+"pathnames_to_compress": "pathnames.conf",
+"remote_hosts_file":  "rhosts.conf",
+"installation_dir": "/opt",
+"sudo_path": "/usr/bin/sudo"
+}

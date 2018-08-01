@@ -1,0 +1,17 @@
+
+v1.0 (work in progres...)
+
+    - COMPRESSION ALGORITHMS:
+            - zip
+            - gzip
+
+    - Features:
+        - local backups
+
+
+v2.0
+
+  - allow to add/remove more pathnames at a time (possibly using a combination of eg -A and --file options)
+
+  - more compression algorithms: (i.e.) 7zip and bz2
+  - remote backups
